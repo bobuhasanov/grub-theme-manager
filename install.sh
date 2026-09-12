@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Startup & GRUB Theme Manager - Installer
+# Startup & GRUB Theme Manager - Universal Linux Installer
 # Author: bobuhasanov <boburhasanov6@gmail.com>
 # Repository: https://github.com/bobuhasanov/grub-theme-manager
 # License: MIT
@@ -16,6 +16,13 @@ YELLOW="\033[1;33m"
 RESET="\033[0m"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AUTO_APPLY=false
+
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes) AUTO_APPLY=true ;;
+    esac
+done
 
 echo -e "${CYAN}${BOLD}"
 echo "=================================================================="
@@ -25,28 +32,38 @@ echo "   Author: bobuhasanov                                            "
 echo "=================================================================="
 echo -e "${RESET}"
 
-# 1. Check dependencies
+# 1. Check & Install Dependencies across Debian/Ubuntu, Fedora, Arch
 echo -e "${BLUE}[1/4] Checking dependencies...${RESET}"
-DEPS=()
+DEPS_NEEDED=false
 
 if ! command -v python3 >/dev/null 2>&1; then
-    DEPS+=("python3")
+    DEPS_NEEDED=true
 fi
 
 if ! python3 -c "import gi; gi.require_version('Gtk', '3.0')" 2>/dev/null; then
-    DEPS+=("python3-gi" "gir1.2-gtk-3.0")
+    DEPS_NEEDED=true
 fi
 
 if ! python3 -c "import cairo" 2>/dev/null; then
-    DEPS+=("python3-cairo")
+    DEPS_NEEDED=true
 fi
 
-if [ ${#DEPS[@]} -gt 0 ]; then
-    echo -e "${YELLOW}--> Installing missing dependencies: ${DEPS[*]}...${RESET}"
-    if [ "$EUID" -ne 0 ]; then
-        sudo apt-get update -y && sudo apt-get install -y "${DEPS[@]}"
+if [ "$DEPS_NEEDED" = true ]; then
+    echo -e "${YELLOW}--> Missing required GTK3 / Python dependencies. Attempting auto-install...${RESET}"
+    if command -v apt-get >/dev/null 2>&1; then
+        SUDO_CMD=""
+        [ "$EUID" -ne 0 ] && SUDO_CMD="sudo"
+        $SUDO_CMD apt-get update -y && $SUDO_CMD apt-get install -y python3 python3-gi gir1.2-gtk-3.0 python3-cairo
+    elif command -v dnf >/dev/null 2>&1; then
+        SUDO_CMD=""
+        [ "$EUID" -ne 0 ] && SUDO_CMD="sudo"
+        $SUDO_CMD dnf install -y python3 python3-gobject gtk3 python3-cairo
+    elif command -v pacman >/dev/null 2>&1; then
+        SUDO_CMD=""
+        [ "$EUID" -ne 0 ] && SUDO_CMD="sudo"
+        $SUDO_CMD pacman -S --noconfirm python python-gobject gtk3 python-cairo
     else
-        apt-get update -y && apt-get install -y "${DEPS[@]}"
+        echo -e "${YELLOW}Notice: Please install Python 3, PyGObject (GTK3), and PyCairo using your system package manager.${RESET}"
     fi
 else
     echo -e "${GREEN}✓ All required Python and GTK3 dependencies are satisfied.${RESET}"
@@ -74,6 +91,9 @@ APP_DEST="${HOME}/.local/share/applications"
 mkdir -p "${APP_DEST}"
 cp "${SCRIPT_DIR}/desktop/grub-theme-manager.desktop" "${APP_DEST}/grub-theme-manager.desktop"
 
+# Set absolute executable path in desktop entry to ensure it launches reliably on all desktop environments
+sed -i "s|^Exec=.*|Exec=${BIN_DEST}/grub-theme-manager|" "${APP_DEST}/grub-theme-manager.desktop"
+
 # Update desktop icon cache
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "${APP_DEST}" 2>/dev/null || true
@@ -84,15 +104,21 @@ echo -e "${GREEN}✓ Added launcher to Cinnamon / GNOME / XFCE application menu!
 # 4. Optional instant system deployment
 echo -e "\n${BLUE}[4/4] System configuration options...${RESET}"
 echo -e "You can launch the GUI now from your Application Menu (under Administration or Preferences),"
-echo -e "or run '${BOLD}grub-theme-manager${RESET}' in your terminal to view the 1:1 live simulator."
+echo -e "or run '${BOLD}${BIN_DEST}/grub-theme-manager${RESET}' in your terminal to view the 1:1 live simulator."
 echo ""
-echo -e "${YELLOW}Would you like to apply the theme to /boot/grub right now? [Y/n] ${RESET}"
-read -r -t 15 REPLY || REPLY="n"
-if [[ "${REPLY:-n}" =~ ^[Yy]$ ]]; then
-    echo -e "--> Applying theme to system (authenticating)..."
+
+if [ "$AUTO_APPLY" = true ]; then
+    echo -e "--> Auto-applying theme to system..."
     bash "${THEMES_DEST}/install-mac-obsidian.sh"
 else
-    echo -e "--> Skipped instant deployment. You can apply it anytime inside the GUI application!"
+    echo -e "${YELLOW}Would you like to apply the theme to /boot/grub right now? [Y/n] ${RESET}"
+    read -r -t 15 REPLY || REPLY="n"
+    if [[ "${REPLY:-n}" =~ ^[Yy]$ ]]; then
+        echo -e "--> Applying theme to system (authenticating)..."
+        bash "${THEMES_DEST}/install-mac-obsidian.sh"
+    else
+        echo -e "--> Skipped instant deployment. You can apply it anytime inside the GUI application!"
+    fi
 fi
 
 echo -e "\n${GREEN}${BOLD}=================================================================="

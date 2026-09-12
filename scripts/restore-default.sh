@@ -7,6 +7,13 @@
 
 set -euo pipefail
 
+# Determine boot directory (/boot/grub vs /boot/grub2)
+if [ -d "/boot/grub2" ] && [ ! -d "/boot/grub" ]; then
+    BOOT_GRUB_DIR="/boot/grub2"
+else
+    BOOT_GRUB_DIR="/boot/grub"
+fi
+
 GRUB_CONFIG="/etc/default/grub"
 BACKUP_CONFIG="/etc/default/grub.original.bak"
 
@@ -40,8 +47,20 @@ else
     echo "==> Removed theme parameters from ${GRUB_CONFIG}"
 fi
 
-echo "==> Updating GRUB configuration..."
-update-grub
+echo "==> Generating GRUB bootloader configuration..."
+if command -v update-grub >/dev/null 2>&1; then
+    update-grub
+elif command -v grub2-mkconfig >/dev/null 2>&1; then
+    if [ -f /boot/grub2/grub.cfg ]; then
+        grub2-mkconfig -o /boot/grub2/grub.cfg
+    elif [ -f /boot/efi/EFI/fedora/grub.cfg ]; then
+        grub2-mkconfig -o /boot/efi/EFI/fedora/grub.cfg
+    else
+        grub2-mkconfig -o "${BOOT_GRUB_DIR}/grub.cfg"
+    fi
+elif command -v grub-mkconfig >/dev/null 2>&1; then
+    grub-mkconfig -o "${BOOT_GRUB_DIR}/grub.cfg"
+fi
 
 echo "=================================================="
 echo " Default GRUB configuration successfully restored!"
