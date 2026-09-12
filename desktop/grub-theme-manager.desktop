@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Startup & GRUB Theme Manager
+Comment=Configure dual-boot macOS theme, boot timeout, and default operating system
+Exec=grub-theme-manager
+Icon=preferences-system-windows
+Terminal=false
+Type=Application
+Categories=Settings;System;Administration;
+Keywords=grub;boot;theme;macos;dualboot;startup;
+StartupNotify=true

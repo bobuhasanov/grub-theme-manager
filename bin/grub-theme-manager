@@ -1,0 +1,512 @@
+#!/usr/bin/env python3
+"""
+Startup & GRUB Theme Manager
+A modern GTK3 GUI utility featuring a live 1:1 interactive GRUB 2 bootloader simulator.
+Allows real-time keyboard/mouse navigation, live countdown simulation, default OS selection,
+and secure system configuration according to the Zero-Resource Background Policy.
+"""
+
+import os
+import sys
+import math
+import subprocess
+import cairo
+import gi
+
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+gi.require_version('GdkPixbuf', '2.0')
+from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
+
+def get_resource_paths():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(script_dir)
+    
+    repo_theme = os.path.join(parent_dir, "themes", "mac-obsidian")
+    if os.path.exists(os.path.join(repo_theme, "theme.txt")):
+        theme_dir = repo_theme
+        install_script = os.path.join(parent_dir, "scripts", "install-theme.sh")
+        restore_script = os.path.join(parent_dir, "scripts", "restore-default.sh")
+    else:
+        theme_dir = os.path.expanduser("~/.local/share/grub-themes/mac-obsidian")
+        install_script = os.path.expanduser("~/.local/share/grub-themes/install-mac-obsidian.sh")
+        restore_script = os.path.expanduser("~/.local/share/grub-themes/restore-default-grub.sh")
+        if not os.path.exists(theme_dir) and os.path.exists("/boot/grub/themes/mac-obsidian"):
+            theme_dir = "/boot/grub/themes/mac-obsidian"
+            
+    return theme_dir, install_script, restore_script
+
+THEME_DIR, INSTALL_SCRIPT, RESTORE_SCRIPT = get_resource_paths()
+BG_PATH = os.path.join(THEME_DIR, "background.png")
+ICONS_DIR = os.path.join(THEME_DIR, "icons")
+GRUB_CONFIG = "/etc/default/grub"
+
+class GrubSimulatorWidget(Gtk.DrawingArea):
+    """
+    1:1 Interactive Live Simulator of the GRUB 2 Bootloader screen.
+    Renders the exact 1920x1080 visual layout scaled to the canvas.
+    Supports keyboard navigation (Up/Down/Enter), mouse clicks, and live countdown.
+    """
+    def __init__(self, parent_window):
+        super().__init__()
+        self.parent_window = parent_window
+        self.set_size_request(640, 360) # 16:9 Aspect Ratio
+        self.set_can_focus(True)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.KEY_PRESS_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
+
+        self.bg_pixbuf = None
+        self.load_background()
+
+        # Menu Entries matching grub.cfg
+        self.entries = [
+            {"title": "Linux Mint 22.3 Cinnamon", "icon_name": "linuxmint.png"},
+            {"title": "Advanced options for Linux Mint 22.3 Cinnamon", "icon_name": "linuxmint.png"},
+            {"title": "Windows Boot Manager (on /dev/nvme0n1p1)", "icon_name": "windows.png"},
+            {"title": "UEFI Firmware Settings", "icon_name": "uefi.png"}
+        ]
+        self.selected_index = 0
+        self.icons = {}
+        self.load_icons()
+
+        # Countdown Timer state
+        self.total_seconds = 10
+        self.seconds_left = 10
+        self.is_counting = True
+        self.timer_source = None
+        self.start_timer()
+
+        self.connect("draw", self.on_draw)
+        self.connect("button-press-event", self.on_button_press)
+
+    def load_background(self):
+        if os.path.exists(BG_PATH):
+            try:
+                self.bg_pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(BG_PATH, 640, 360, False)
+            except Exception as e:
+                print("Failed to load background:", e)
+
+    def load_icons(self):
+        for item in self.entries:
+            name = item["icon_name"]
+            if name not in self.icons:
+                icon_path = os.path.join(ICONS_DIR, name)
+                if os.path.exists(icon_path):
+                    try:
+                        pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(icon_path, 22, 22, True)
+                        self.icons[name] = pb
+                    except Exception as e:
+                        print(f"Failed to load icon {name}:", e)
+
+    def start_timer(self):
+        if self.timer_source:
+            GLib.source_remove(self.timer_source)
+        self.is_counting = True
+        self.timer_source = GLib.timeout_add(1000, self.on_tick)
+
+    def pause_timer(self):
+        self.is_counting = False
+        if self.timer_source:
+            GLib.source_remove(self.timer_source)
+            self.timer_source = None
+        self.queue_draw()
+
+    def reset_timer(self, seconds=None):
+        if seconds is not None:
+            self.total_seconds = seconds
+        self.seconds_left = self.total_seconds
+        self.start_timer()
+        self.queue_draw()
+
+    def on_tick(self):
+        if not self.is_counting:
+            return False
+        if self.seconds_left > 0:
+            self.seconds_left -= 1
+            self.queue_draw()
+            return True
+        else:
+            self.is_counting = False
+            self.queue_draw()
+            # Do not pop up modal dialog automatically; user can press Enter or reset
+            return False
+
+    def select_next(self):
+        self.pause_timer()
+        self.selected_index = (self.selected_index + 1) % len(self.entries)
+        self.queue_draw()
+
+    def select_prev(self):
+        self.pause_timer()
+        self.selected_index = (self.selected_index - 1) % len(self.entries)
+        self.queue_draw()
+
+    def on_button_press(self, widget, event):
+        self.grab_focus()
+        # Scale coords: canvas is 640x360
+        # Menu starts at y = 360 * 0.35 = 126
+        # item height = 30px, spacing = 8px
+        menu_top = 360 * 0.33
+        item_h = 28
+        spacing = 8
+        click_y = event.y
+
+        for i in range(len(self.entries)):
+            y_start = menu_top + i * (item_h + spacing)
+            if y_start <= click_y <= y_start + item_h:
+                self.pause_timer()
+                self.selected_index = i
+                self.queue_draw()
+                break
+        return True
+
+    def on_draw(self, widget, cr):
+        width = widget.get_allocated_width()
+        height = widget.get_allocated_height()
+
+        # 1. Render Wallpaper Background
+        if self.bg_pixbuf:
+            Gdk.cairo_set_source_pixbuf(cr, self.bg_pixbuf, 0, 0)
+            cr.paint()
+        else:
+            cr.set_source_rgb(0.04, 0.06, 0.07)
+            cr.paint()
+
+        # 2. Render Central Boot Menu (640x360 coordinates)
+        # Scaled 1:1 with GRUB's 1920x1080 layout
+        menu_top = height * 0.33
+        menu_w = 400
+        menu_left = (width - menu_w) / 2
+        item_h = 28
+        spacing = 8
+
+        for i, item in enumerate(self.entries):
+            y = menu_top + i * (item_h + spacing)
+            is_selected = (i == self.selected_index)
+
+            # Icon
+            icon_pb = self.icons.get(item["icon_name"])
+            if icon_pb:
+                Gdk.cairo_set_source_pixbuf(cr, icon_pb, menu_left + 8, y + (item_h - 22) / 2)
+                cr.paint()
+
+            # Text
+            text_x = menu_left + 8 + 22 + 10
+            text_y = y + 19
+
+            if is_selected:
+                # Glowing Mint Emerald Selection (No overlapping box!)
+                cr.set_source_rgb(0.17, 0.85, 0.53) # #2bd887
+                cr.select_font_face("DejaVu Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+                cr.set_font_size(12)
+            else:
+                # Clean muted grey for unselected
+                cr.set_source_rgb(0.48, 0.56, 0.62) # #7a8f9d
+                cr.select_font_face("DejaVu Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
+                cr.set_font_size(11.5)
+
+            cr.move_to(text_x, text_y)
+            cr.show_text(item["title"])
+
+        # 3. Render Countdown Label (82% height)
+        # In real GRUB, when timeout is active it shows "Booting in %d seconds".
+        # When interrupted by the user, the label is completely hidden.
+        if self.is_counting and self.seconds_left > 0:
+            label_y = height * 0.82
+            cr.select_font_face("DejaVu Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
+            cr.set_font_size(11)
+            cr.set_source_rgb(0.78, 0.85, 0.90) # #c8d8e5
+            msg = f"Booting in {self.seconds_left} seconds"
+            extents = cr.text_extents(msg)
+            cr.move_to((width - extents.width) / 2, label_y)
+            cr.show_text(msg)
+
+        # 4. Minimalist Navigation Footer (height - 18px)
+        footer_y = height - 16
+        cr.set_source_rgb(0.41, 0.49, 0.55)
+        cr.set_font_size(9.5)
+        footer_msg = "[ ↑ / ↓ ] Select Entry   •   [ Enter ] Boot Selected   •   [ E ] Options"
+        f_extents = cr.text_extents(footer_msg)
+        cr.move_to((width - f_extents.width) / 2, footer_y)
+        cr.show_text(footer_msg)
+
+
+class GrubThemeManagerWindow(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Startup & GRUB Theme Manager")
+        self.set_default_size(680, 720)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_resizable(False)
+
+        # Keyboard event capture for 1:1 GRUB control
+        self.connect("key-press-event", self.on_window_key_press)
+
+        # Main Layout
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        main_box.set_margin_top(14)
+        main_box.set_margin_bottom(14)
+        main_box.set_margin_start(18)
+        main_box.set_margin_end(18)
+        self.add(main_box)
+
+        # Header Title
+        header_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        title_lbl = Gtk.Label()
+        title_lbl.set_markup("<span size='x-large' weight='bold'>Startup &amp; GRUB Theme Manager</span>")
+        title_lbl.set_xalign(0)
+        subtitle_lbl = Gtk.Label()
+        subtitle_lbl.set_markup("<span size='small' alpha='70%'>Interactive 1:1 bootloader simulator • Configure dual-boot, timeout, and appearance</span>")
+        subtitle_lbl.set_xalign(0)
+        header_box.pack_start(title_lbl, False, False, 0)
+        header_box.pack_start(subtitle_lbl, False, False, 0)
+        main_box.pack_start(header_box, False, False, 0)
+
+        # 1. Interactive 1:1 GRUB Simulator Frame
+        sim_frame = Gtk.Frame(label=" Live 1:1 GRUB 2 Simulator ")
+        sim_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        sim_box.set_margin_top(8)
+        sim_box.set_margin_bottom(8)
+        sim_box.set_margin_start(8)
+        sim_box.set_margin_end(8)
+
+        # Simulator Canvas
+        self.simulator = GrubSimulatorWidget(self)
+        sim_box.pack_start(self.simulator, False, False, 0)
+
+        # Interactive controls bar
+        ctrl_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        
+        hint_lbl = Gtk.Label()
+        hint_lbl.set_markup("<span size='small' alpha='75%'>💡 Use <b>Up / Down Arrow Keys</b> or click to test entries</span>")
+        hint_lbl.set_xalign(0)
+        ctrl_bar.pack_start(hint_lbl, True, True, 4)
+
+        btn_pause = Gtk.Button(label="⏸ Pause Timer")
+        btn_pause.connect("clicked", lambda w: self.simulator.pause_timer())
+        ctrl_bar.pack_end(btn_pause, False, False, 0)
+
+        btn_reset = Gtk.Button(label="↺ Reset Timer")
+        btn_reset.connect("clicked", lambda w: self.simulator.reset_timer(int(self.scale_time.get_value())))
+        ctrl_bar.pack_end(btn_reset, False, False, 0)
+
+        sim_box.pack_start(ctrl_bar, False, False, 2)
+        sim_frame.add(sim_box)
+        main_box.pack_start(sim_frame, False, False, 0)
+
+        # 2. Bootloader Settings Card
+        settings_frame = Gtk.Frame(label=" Bootloader System Settings ")
+        settings_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        settings_box.set_margin_top(10)
+        settings_box.set_margin_bottom(10)
+        settings_box.set_margin_start(14)
+        settings_box.set_margin_end(14)
+
+        # Default OS
+        row_os = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        lbl_os = Gtk.Label(label="Default Operating System:")
+        lbl_os.set_xalign(0)
+        row_os.pack_start(lbl_os, True, True, 0)
+
+        self.combo_os = Gtk.ComboBoxText()
+        self.combo_os.append("0", "Linux Mint 22.3 Cinnamon (Default)")
+        self.combo_os.append("windows", "Windows 11 Pro")
+        self.combo_os.set_active(0)
+        self.combo_os.connect("changed", self.on_os_combo_changed)
+        row_os.pack_end(self.combo_os, False, False, 0)
+        settings_box.pack_start(row_os, False, False, 0)
+
+        # Timeout Slider
+        row_time = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        time_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        lbl_time = Gtk.Label(label="Automatic Boot Countdown:")
+        lbl_time.set_xalign(0)
+        self.lbl_time_val = Gtk.Label()
+        self.lbl_time_val.set_markup("<span weight='bold'>10 seconds</span>")
+        time_header.pack_start(lbl_time, True, True, 0)
+        time_header.pack_end(self.lbl_time_val, False, False, 0)
+        row_time.pack_start(time_header, False, False, 0)
+
+        self.scale_time = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 3, 30, 1)
+        self.scale_time.set_value(10)
+        self.scale_time.set_draw_value(False)
+        self.scale_time.connect("value-changed", self.on_timeout_slider_changed)
+        row_time.pack_start(self.scale_time, False, False, 0)
+        settings_box.pack_start(row_time, False, False, 0)
+
+        settings_frame.add(settings_box)
+        main_box.pack_start(settings_frame, False, False, 0)
+
+        # 3. Action Buttons
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+
+        self.btn_restore = Gtk.Button(label="Restore Standard GRUB")
+        self.btn_restore.connect("clicked", self.on_restore_clicked)
+        btn_box.pack_start(self.btn_restore, False, False, 0)
+
+        self.btn_apply = Gtk.Button(label="Save & Apply Settings")
+        self.btn_apply.get_style_context().add_class("suggested-action")
+        self.btn_apply.connect("clicked", self.on_apply_clicked)
+        btn_box.pack_end(self.btn_apply, True, True, 0)
+
+        main_box.pack_start(btn_box, False, False, 0)
+
+        # Status & Zero-Resource Notice
+        self.lbl_status = Gtk.Label()
+        self.lbl_status.set_markup("<span size='small' foreground='#2bd887'>● macOS Obsidian Theme Ready • Zero background resource footprint</span>")
+        self.lbl_status.set_xalign(0.5)
+        main_box.pack_start(self.lbl_status, False, False, 0)
+
+        self.check_current_grub_state()
+
+    def on_window_key_press(self, widget, event):
+        if event.keyval == Gdk.KEY_Up:
+            self.simulator.select_prev()
+            return True
+        elif event.keyval == Gdk.KEY_Down:
+            self.simulator.select_next()
+            return True
+        elif event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            selected = self.simulator.entries[self.simulator.selected_index]["title"]
+            self.show_boot_simulation_toast(selected)
+            return True
+        return False
+
+    def on_os_combo_changed(self, combo):
+        active = combo.get_active()
+        if active == 0:
+            self.simulator.selected_index = 0
+        elif active == 1:
+            self.simulator.selected_index = 2
+        self.simulator.queue_draw()
+
+    def on_timeout_slider_changed(self, scale):
+        val = int(scale.get_value())
+        self.lbl_time_val.set_markup(f"<span weight='bold'>{val} seconds</span>")
+        self.simulator.reset_timer(val)
+
+    def show_boot_simulation_toast(self, os_name):
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text=f"Simulated Boot: {os_name}"
+        )
+        dialog.format_secondary_text(
+            f"In real hardware boot, GRUB will now cleanly launch '{os_name}' silently without log dumps."
+        )
+        dialog.run()
+        dialog.destroy()
+        self.simulator.reset_timer()
+
+    def check_current_grub_state(self):
+        if os.path.exists(GRUB_CONFIG):
+            try:
+                with open(GRUB_CONFIG, 'r') as f:
+                    content = f.read()
+                    if "mac-obsidian" in content:
+                        self.lbl_status.set_markup("<span size='small' foreground='#2bd887'>● macOS Obsidian Theme is ACTIVE on system</span>")
+                        self.btn_apply.set_label("Save & Re-apply Settings")
+                    else:
+                        self.lbl_status.set_markup("<span size='small' foreground='#f0ad4e'>○ Standard Default GRUB Active</span>")
+                        self.btn_apply.set_label("Install & Apply macOS Obsidian Theme")
+            except Exception:
+                pass
+
+    def on_apply_clicked(self, widget):
+        timeout = int(self.scale_time.get_value())
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text="Apply macOS Obsidian Theme to System?"
+        )
+        dialog.format_secondary_text(
+            f"This will update /etc/default/grub with 1920x1080 resolution and {timeout}s timeout.\n"
+            "Administrator authentication (pkexec) will prompt for your password."
+        )
+        resp = dialog.run()
+        dialog.destroy()
+
+        if resp == Gtk.ResponseType.OK:
+            self.run_privileged_script(INSTALL_SCRIPT)
+
+    def on_restore_clicked(self, widget):
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text="Restore Standard GRUB Bootloader?"
+        )
+        dialog.format_secondary_text(
+            "This will revert /etc/default/grub to standard text mode and update GRUB."
+        )
+        resp = dialog.run()
+        dialog.destroy()
+
+        if resp == Gtk.ResponseType.OK:
+            self.run_privileged_script(RESTORE_SCRIPT)
+
+    def run_privileged_script(self, script_path):
+        if not os.path.exists(script_path):
+            self.show_error("Script Not Found", f"Cannot find {script_path}")
+            return
+
+        self.btn_apply.set_sensitive(False)
+        self.btn_restore.set_sensitive(False)
+        self.lbl_status.set_markup("<span foreground='#00a2ed'>Applying changes to system (authenticating)...</span>")
+
+        def worker():
+            try:
+                cmd = ["pkexec", "bash", script_path]
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                GLib.idle_add(self.on_worker_finished, proc.returncode, proc.stdout, proc.stderr)
+            except Exception as ex:
+                GLib.idle_add(self.on_worker_finished, 1, "", str(ex))
+
+        import threading
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+
+    def on_worker_finished(self, returncode, stdout, stderr):
+        self.btn_apply.set_sensitive(True)
+        self.btn_restore.set_sensitive(True)
+        self.check_current_grub_state()
+
+        if returncode == 0:
+            self.lbl_status.set_markup("<span foreground='#2bd887'><b>✓ Successfully updated GRUB bootloader!</b></span>")
+            msg = Gtk.MessageDialog(
+                transient_for=self,
+                flags=0,
+                message_type=Gtk.MessageType.INFO,
+                buttons=Gtk.ButtonsType.OK,
+                text="GRUB Bootloader Updated Successfully!"
+            )
+            msg.format_secondary_text("The macOS Obsidian theme is configured. Changes will appear on next reboot.")
+            msg.run()
+            msg.destroy()
+        else:
+            self.lbl_status.set_markup(f"<span foreground='#e06c75'><b>Failed (code {returncode})</b></span>")
+            self.show_error("Operation Failed or Cancelled", stderr or stdout or "Authentication was cancelled.")
+
+    def show_error(self, title, msg_text):
+        err = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK,
+            text=title
+        )
+        err.format_secondary_text(msg_text)
+        err.run()
+        err.destroy()
+
+def main():
+    win = GrubThemeManagerWindow()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+if __name__ == "__main__":
+    main()

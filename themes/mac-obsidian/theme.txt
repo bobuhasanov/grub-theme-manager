@@ -1,0 +1,56 @@
+# macOS Obsidian Dual-Boot Theme for GRUB 2
+# Resolution: 1920x1080 Native FHD
+
+# Global Properties
+title-text: ""
+desktop-image: "background.png"
+desktop-image-scale-method: "stretch"
+desktop-color: "#0c1013"
+terminal-font: "DejaVu Sans Regular 14"
+terminal-left: "0"
+terminal-top: "0"
+terminal-width: "100%"
+terminal-height: "100%"
+terminal-border: "0"
+
+# Central macOS-Style Boot Menu (Clean Floating - No Overlapping Boxes)
++ boot_menu {
+  left = 50%-280
+  top = 35%
+  width = 560
+  height = 36%
+  item_font = "DejaVu Sans Regular 16"
+  item_color = "#7a8f9d"
+  selected_item_font = "DejaVu Sans Bold 16"
+  selected_item_color = "#2bd887"
+  icon_width = 36
+  icon_height = 36
+  item_icon_space = 18
+  item_height = 54
+  item_padding = 10
+  item_spacing = 16
+  scrollbar = false
+}
+
+# 10-Second Countdown Label
++ label {
+  top = 82%
+  left = 30%
+  width = 40%
+  align = "center"
+  id = "__timeout__"
+  text = "Booting in %d seconds"
+  color = "#c8d8e5"
+  font = "DejaVu Sans Regular 16"
+}
+
+# Minimalist Navigation Footer
++ label {
+  top = 100%-50
+  left = 25%
+  width = 50%
+  align = "center"
+  text = "[ ↑ / ↓ ] Select Entry   •   [ Enter ] Boot Selected   •   [ E ] Options"
+  color = "#697d8c"
+  font = "DejaVu Sans Regular 14"
+}
